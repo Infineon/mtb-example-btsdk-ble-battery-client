@@ -56,13 +56,14 @@ SUPPORTED_TARGETS = \
   CYBT-273063-EVAL \
   CYBT-263065-EVAL \
   CYW989820EVB-01 \
-  CYW920721B2EVK-03 \
   CYW920721B2EVK-02 \
   CYW920719B2Q40EVB-01 \
   CYW920706WCDEVAL \
   CYBT-353027-EVAL \
   CYBT-343026-EVAL \
+  CYBT-343052-EVAL \
   CYW920735Q60EVB-01 \
+  CYW920835M2EVB-01 \
   CYBT-423054-EVAL \
   CYBT-413055-EVAL \
   CYBT-483056-EVAL \
@@ -164,6 +165,6 @@ CY_BT_APP_TOOLS=BTSpy ClientControl
 
 -include internal.mk
 ifeq ($(filter $(TARGET),$(SUPPORTED_TARGETS)),)
-$(error TARGET $(TARGET) not supported for this code example)
+$(error TARGET $(TARGET) not supported for this application. Edit SUPPORTED_TARGETS in the code example makefile to add new BSPs)
 endif
 include $(CY_TOOLS_DIR)/make/start.mk

@@ -141,7 +141,7 @@ typedef struct
 typedef struct
 {
     uint16_t conn_id;                   // Connection Identifier
-    uint8_t  role;                      // master or slave in the current connection
+    uint8_t  role;                      // central or peripheral in the current connection
     uint8_t  addr_type;                 // peer address type
     uint8_t  transport;                 // peer connected transport
     uint8_t  peer_addr[BD_ADDR_LEN];    // Peer BD Address
@@ -257,7 +257,7 @@ APPLICATION_START( )
 
 void battery_client_set_input_interrupt(void)
 {
-#if ( defined(CYW20719B1) || defined(CYW20721B1) || defined(CYW20735B1) || defined(CYW20819A1) || defined(CYW20721B2) || defined(CYW20719B2) )
+#if ( defined(CYW20719B1) || defined(CYW20721B1) || defined(CYW20735B1) || defined(CYW20835B1) || defined(CYW20819A1) || defined(CYW20721B2) || defined(CYW20719B2) )
     /* Configure buttons available on the platform */
     wiced_platform_register_button_callback( WICED_PLATFORM_BUTTON_1, battery_client_interrupt_handler, NULL, WICED_PLATFORM_BUTTON_BOTH_EDGE);
 #else
@@ -288,7 +288,7 @@ void battery_client_interrupt_handler( void *user_data, uint8_t value )
     static uint32_t button_pushed_time = 0;
     wiced_result_t result;
     wiced_bt_gatt_status_t status;
-#if ( defined(CYW20719B1) || defined(CYW20721B1) || defined(CYW20735B1) || defined(CYW20819A1) || defined(CYW20721B2) || defined(CYW20719B2) )
+#if ( defined(CYW20719B1) || defined(CYW20721B1) || defined(CYW20735B1) || defined(CYW20835B1) || defined(CYW20819A1) || defined(CYW20721B2) || defined(CYW20719B2) )
     if ( wiced_hal_gpio_get_pin_input_status(WICED_GET_PIN_FOR_BUTTON(WICED_PLATFORM_BUTTON_1)) == wiced_platform_get_button_pressed_value(WICED_PLATFORM_BUTTON_1) )
 #else
     if ( wiced_hal_gpio_get_pin_input_status(APP_BUTTON) == BUTTON_PRESSED )
@@ -342,7 +342,7 @@ static void battery_client_app_init()
 {
     wiced_bt_gatt_status_t gatt_status;
 
-#if !defined(CYW20735B1) && !defined(CYW20819A1) && !defined(CYW20719B2) && !defined(CYW20721B2)
+#if !defined(CYW20735B1) && !defined(CYW20835B1) && !defined(CYW20819A1) && !defined(CYW20719B2) && !defined(CYW20721B2)
     /* Initialize wiced app */
     wiced_bt_app_init();
 #endif
