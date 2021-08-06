@@ -185,9 +185,9 @@ static void                   battery_client_callback(wiced_bt_bac_event_t event
  ******************************************************************************/
 battery_service_client_peer_info_t  battery_client_app_data;
 battery_service_client_app_t battery_client_app_state;
-uint32_t app_timer_count = 0;
+uint32_t bac_app_timer_count = 0;
 wiced_bool_t is_enabled_notification = WICED_FALSE;
-wiced_timer_t app_timer;
+wiced_timer_t bac_app_timer;
 
 const wiced_transport_cfg_t  transport_cfg =
 {
@@ -266,9 +266,9 @@ void battery_client_set_input_interrupt(void)
 #endif
 
     /* Starting the app timer */
-    if ( wiced_init_timer(&app_timer, battery_client_app_timer, 0, WICED_SECONDS_PERIODIC_TIMER) == WICED_SUCCESS)
+    if ( wiced_init_timer(&bac_app_timer, battery_client_app_timer, 0, WICED_SECONDS_PERIODIC_TIMER) == WICED_SUCCESS)
     {
-        if ( wiced_start_timer(&app_timer,BATTC_APP_TIMEOUT_IN_SECONDS) != WICED_SUCCESS)
+        if ( wiced_start_timer(&bac_app_timer,BATTC_APP_TIMEOUT_IN_SECONDS) != WICED_SUCCESS)
         {
             WICED_BT_TRACE("Start timer FAILED!!");
         }
@@ -278,9 +278,9 @@ void battery_client_set_input_interrupt(void)
 /* The function invoked on timeout of app seconds timer. */
 void battery_client_app_timer( uint32_t arg )
 {
-    app_timer_count++;
-    if ((app_timer_count % 10) == 0)
-        WICED_BT_TRACE("%d \n", app_timer_count);
+    bac_app_timer_count++;
+    if ((bac_app_timer_count % 10) == 0)
+        WICED_BT_TRACE("%d \n", bac_app_timer_count);
 }
 
 void battery_client_interrupt_handler( void *user_data, uint8_t value )
@@ -294,11 +294,11 @@ void battery_client_interrupt_handler( void *user_data, uint8_t value )
     if ( wiced_hal_gpio_get_pin_input_status(APP_BUTTON) == BUTTON_PRESSED )
 #endif
     {
-        button_pushed_time = app_timer_count;
+        button_pushed_time = bac_app_timer_count;
     }
     else if ( button_pushed_time != 0 )
     {
-        if ( app_timer_count - button_pushed_time > 5 )
+        if ( bac_app_timer_count - button_pushed_time > 5 )
         {
              if(!is_enabled_notification)
              {
@@ -311,11 +311,11 @@ void battery_client_interrupt_handler( void *user_data, uint8_t value )
                 WICED_BT_TRACE("Disabling Notification: %x \n",status);
              }
         }
-        else if( (app_timer_count - button_pushed_time > 2) && (app_timer_count - button_pushed_time < 4) )
+        else if( (bac_app_timer_count - button_pushed_time > 2) && (bac_app_timer_count - button_pushed_time < 4) )
         {
             wiced_bt_bac_read_battery_level( battery_client_app_data.conn_id );
         }
-        else if( app_timer_count - button_pushed_time < 2 )
+        else if( bac_app_timer_count - button_pushed_time < 2 )
         {
             /*start scan if not connected and no scan in progress*/
             if (( battery_client_app_data.conn_id == 0 ) && (wiced_bt_ble_get_current_scan_state() == BTM_BLE_SCAN_TYPE_NONE))
