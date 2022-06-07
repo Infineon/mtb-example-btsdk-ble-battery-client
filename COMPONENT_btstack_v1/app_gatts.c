@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2021, Cypress Semiconductor Corporation (an Infineon company) or
+ * Copyright 2016-2022, Cypress Semiconductor Corporation (an Infineon company) or
  * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
  *
  * This software, including source code, documentation and related
@@ -35,6 +35,7 @@
 
 #include "wiced_bt_gatt.h"
 #include "wiced_bt_trace.h"
+#include "wiced_memory.h"
 #include "battery_client.h"
 
 /*
@@ -100,3 +101,42 @@ wiced_bt_gatt_status_t battery_client_gatts_callback( wiced_bt_gatt_evt_t event,
 
     return result;
 }
+
+#ifdef BATTERY_LEVEL_BROADCAST
+/*
+ * This function writes into bas server character descriptor to enable broadcast of battery level status
+ */
+void battery_client_gatts_enable_broadcast ( uint16_t conn_id, uint16_t handle, uint8_t enable_broadcast )
+{
+    wiced_bt_gatt_status_t status;
+    uint16_t  u16 = (enable_broadcast == WICED_TRUE) ? GATT_SERVER_CONFIG_BROADCAST : GATT_SERVER_CONFIG_NONE;
+
+    if( handle == 0 )
+    {
+        // looks like a battery server with broadcast char was not
+        // found during the gatt discovery, safe to return
+        WICED_BT_TRACE("No battery server broadcast found \n");
+        return;
+    }
+
+    // Allocating a buffer to send the write request
+    wiced_bt_gatt_value_t *p_write = ( wiced_bt_gatt_value_t* )wiced_bt_get_buffer( sizeof( wiced_bt_gatt_value_t ) + 2 );
+
+    if ( p_write )
+    {
+        uint8_t * value_p = &p_write->value[0];
+        p_write->handle   = handle;
+        p_write->offset   = 0;
+        p_write->len      = 2;
+        p_write->auth_req = GATT_AUTH_REQ_NONE;
+        value_p[0] = u16 & 0xff;
+        value_p[1] = (u16 >> 8) & 0xff;
+
+        // enable broadcasts on the battery server, so this or any other client can receive them
+        status = wiced_bt_gatt_send_write ( conn_id, GATT_WRITE, p_write );
+        wiced_bt_free_buffer( p_write );
+        WICED_BT_TRACE("battery_client_gatts_enable_broadcast:%d \n", status);
+    }
+}
+
+#endif

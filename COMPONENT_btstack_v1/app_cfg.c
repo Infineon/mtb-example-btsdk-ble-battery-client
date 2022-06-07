@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2021, Cypress Semiconductor Corporation (an Infineon company) or
+ * Copyright 2016-2022, Cypress Semiconductor Corporation (an Infineon company) or
  * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
  *
  * This software, including source code, documentation and related
@@ -47,29 +47,6 @@
  */
 #define WICED_DEVICE_NAME                       "Battery Client"
 
-/*****************************************************************************
- * transport configuration
- ****************************************************************************/
-const wiced_transport_cfg_t  transport_cfg =
-{
-    .type = WICED_TRANSPORT_UART,
-    .cfg =
-    {
-        .uart_cfg =
-        {
-            .mode = WICED_TRANSPORT_UART_HCI_MODE,
-            .baud_rate =  HCI_UART_DEFAULT_BAUD
-        },
-    },
-    .rx_buff_pool_cfg =
-    {
-        .buffer_size = 0,
-        .buffer_count = 0
-    },
-    .p_status_handler = NULL,
-    .p_data_handler = NULL,
-    .p_tx_complete_cback = NULL
-};
 
 /*****************************************************************************
  * bt configuration

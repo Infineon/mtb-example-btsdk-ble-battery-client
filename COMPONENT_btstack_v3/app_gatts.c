@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2021, Cypress Semiconductor Corporation (an Infineon company) or
+ * Copyright 2016-2022, Cypress Semiconductor Corporation (an Infineon company) or
  * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
  *
  * This software, including source code, documentation and related
@@ -135,3 +135,40 @@ wiced_bt_gatt_status_t battery_client_gatts_callback( wiced_bt_gatt_evt_t event,
 
     return result;
 }
+
+#ifdef BATTERY_LEVEL_BROADCAST
+/*
+ * This function writes into bas server character descriptor to enable broadcast of battery level status
+ */
+void battery_client_gatts_enable_broadcast ( uint16_t conn_id, uint16_t handle, uint8_t enable_broadcast )
+{
+    wiced_bt_gatt_status_t status;
+    uint16_t  u16 = (enable_broadcast == WICED_TRUE) ? GATT_SERVER_CONFIG_BROADCAST : GATT_SERVER_CONFIG_NONE;
+     wiced_bt_gatt_write_hdr_t enable_notif = { 0 };
+
+    if( handle == 0 )
+    {
+        // broadcast char was not found during the gatt discovery, safe to return
+        WICED_BT_TRACE("No battery server broadcast found \n");
+        return;
+    }
+
+    // Allocating a buffer to send the write request
+    uint8_t* val = wiced_bt_get_buffer(sizeof(uint16_t));
+
+    if ( val )
+    {
+        WICED_MEMCPY(val, &u16, sizeof(uint16_t));
+        enable_notif.auth_req = GATT_AUTH_REQ_NONE;
+        enable_notif.handle   = handle;
+        enable_notif.offset   = 0;
+        enable_notif.len      = 2;
+
+        // enable broadcasts on the battery server, so this or any other client can receive them
+        status = wiced_bt_gatt_client_send_write(conn_id, GATT_REQ_WRITE, &enable_notif, val, (wiced_bt_gatt_app_context_t)wiced_bt_free_buffer);
+
+        WICED_BT_TRACE("battery_client_gatts_enable_broadcast:%d \n", status);
+    }
+}
+
+#endif

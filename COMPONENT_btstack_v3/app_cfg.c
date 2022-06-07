@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2021, Cypress Semiconductor Corporation (an Infineon company) or
+ * Copyright 2016-2022, Cypress Semiconductor Corporation (an Infineon company) or
  * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
  *
  * This software, including source code, documentation and related
@@ -51,29 +51,6 @@
 /*****************************************************************************
  * wiced_bt core stack configuration
  ****************************************************************************/
-/* transport configuration */
-const wiced_transport_cfg_t  transport_cfg =
-{
-    .type = WICED_TRANSPORT_UART,
-    .cfg =
-    {
-        .uart_cfg =
-        {
-            .mode = WICED_TRANSPORT_UART_HCI_MODE,
-            .baud_rate =  HCI_UART_DEFAULT_BAUD
-        },
-    },
-    .heap_config =
-    {
-        .data_heap_size = 1024 * 4 + 1500 * 2,
-        .hci_trace_heap_size = 1024 * 2,
-        .debug_trace_heap_size = 1024,
-    },
-    .p_status_handler = NULL,
-    .p_data_handler = NULL,
-    .p_tx_complete_cback = NULL
-};
-
 
 /* BLE SCAN Setting */
 const wiced_bt_cfg_ble_scan_settings_t wiced_bt_cfg_scan_settings =

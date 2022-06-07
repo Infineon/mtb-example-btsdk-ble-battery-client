@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2021, Cypress Semiconductor Corporation (an Infineon company) or
+ * Copyright 2016-2022, Cypress Semiconductor Corporation (an Infineon company) or
  * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
  *
  * This software, including source code, documentation and related
@@ -66,15 +66,20 @@
 #include "wiced_bt_stack.h"
 #include "wiced_bt_trace.h"
 #include "wiced_bt_battery_client.h"
+#include "wiced_bt_battery_server.h"
 #include "wiced_hal_nvram.h"
 #include "wiced_platform.h"
 #include "wiced_hal_puart.h"
 #include "wiced_bt_gatt_util.h"
+#include "hci_control_api.h"
 #include "wiced_timer.h"
 #include "battery_client.h"
 #if !defined(CYW20706A2) && !defined(CYW43012C0)
  #include "cycfg_pins.h"
 #endif
+
+//#define ENABLE_HCI_TRACE 1 // configures HCI traces to be routed to the AIROC HCI interface
+#define TEST_HCI_CONTROL
 
 /******************************************************************************
  *                                Constants
@@ -88,12 +93,66 @@ uint32_t button_pushed_time = APP_TIMER_IDLE;;
 battery_service_client_peer_info_t  battery_client_app_data;
 battery_service_client_app_t battery_client_app_state;
 uint32_t bac_app_timer_count = 0;
-wiced_bool_t is_bas_enabled = WICED_FALSE;
+wiced_bool_t is_bas_enabled = WICED_FALSE, is_broadcast_enabled = WICED_FALSE;
 wiced_timer_t bac_app_timer;
 
+static uint8_t battery_service_found  = 0;
 /******************************************************************************
  *                             External Definitions
  ******************************************************************************/
+#ifdef BATTERY_LEVEL_BROADCAST
+extern void battery_client_gatts_enable_broadcast ( uint16_t conn_id, uint16_t handle, uint8_t enable_broadcast );
+extern uint16_t wicked_bt_battery_client_server_characterstic_handle;
+#endif
+
+#ifdef TEST_HCI_CONTROL
+static uint32_t  battery_client_hci_rx_cmd(uint8_t *p_data, uint32_t length);
+static void battery_client_hci_transport_status( wiced_transport_type_t type );
+static void battery_client_hci_handle_get_version();
+static void battery_client_hci_send_connect_event( uint8_t addr_type, BD_ADDR addr, uint16_t con_handle, uint8_t role );
+static void battery_client_hci_send_disconnect_event( uint8_t reason, uint16_t con_handle );
+#endif
+
+#define TRANS_UART_BUFFER_SIZE          1024
+
+const wiced_transport_cfg_t transport_cfg =
+{
+    .type = WICED_TRANSPORT_UART,
+    .cfg =
+    {
+        .uart_cfg =
+        {
+            .mode = WICED_TRANSPORT_UART_HCI_MODE,
+            .baud_rate =  HCI_UART_DEFAULT_BAUD
+        },
+    },
+#if BTSTACK_VER >= 0x03000001
+    .heap_config =
+    {
+        .data_heap_size = 1024 * 4 + 1500 * 2,
+        .hci_trace_heap_size = 1024 * 2,
+        .debug_trace_heap_size = 1024,
+    },
+#else
+    .rx_buff_pool_cfg =
+    {
+        .buffer_size  = TRANS_UART_BUFFER_SIZE,
+        .buffer_count = 1
+    },
+#endif
+
+#ifdef TEST_HCI_CONTROL
+    .p_status_handler = battery_client_hci_transport_status,
+    .p_data_handler = battery_client_hci_rx_cmd,
+#else
+    .p_status_handler = NULL,
+    .p_data_handler = NULL,
+#endif
+
+    .p_tx_complete_cback = NULL
+};
+
+
 /******************************************************************************
  *                          Function Definitions
  ******************************************************************************/
@@ -124,22 +183,246 @@ static void battery_client_out_bytes(char * msg, uint16_t len, uint8_t  *p_data)
 
 static void battery_client_show_data(char * msg, wiced_bt_battery_client_event_t event, wiced_bt_battery_client_event_data_t *p_data)
 {
-//    WICED_BT_TRACE("show data, uuid=%04x  %s\n", p_data->data.uuid, msg);
+//  WICED_BT_TRACE("show data, uuid=%04x  %s\n", p_data->data.uuid, msg);
+    uint8_t flags8 = 0, flags16 = 0;
+
     switch (p_data->data.uuid)
     {
     case UUID_CHARACTERISTIC_BATTERY_LEVEL:
         WICED_BT_TRACE("[%13s] Battery Level:%d\n", msg, p_data->data.p_data[0]);
         break;
 
+ #ifdef BAS_1_1
+    case UUID_CHARACTERISTIC_BATTERY_LEVEL_STATUS:
+        {
+            UINT16 identifier = 0, power_state = 0, flags8 = 0;
+            UINT8  battery_level = 0, additional_status = 0;
+
+            STREAM_TO_UINT8(flags8, p_data->data.p_data);
+            STREAM_TO_UINT16(power_state, p_data->data.p_data);
+            batt_power_state_t *batt_power_state = (batt_power_state_t *)&power_state;
+
+            if ( flags8 & BATTERY_LEVEL_STATUS_ID_PRESENT )
+            {
+                STREAM_TO_UINT16(identifier, p_data->data.p_data);
+            }
+            if ( flags8 & BATTERY_LEVEL_STATUS_LEVEL_PRESENT )
+            {
+                STREAM_TO_UINT8(battery_level, p_data->data.p_data);
+            }
+            if ( flags8 & BATTERY_LEVEL_STATUS_ADD_ST_PRESENT )
+            {
+               STREAM_TO_UINT8(additional_status, p_data->data.p_data);
+            }
+            batt_add_status_t *batt_add_status = (batt_add_status_t *)&additional_status;
+
+            WICED_BT_TRACE("BATTERY_LEVEL_STATUS: flags8:%d  batt_present:%d wired_ext_pwr_connected:%d wireless_ext_pwr_connected:%d \
+                           batt_charge_state:%d  batt_charge_level:%d batt_charge_type:%d batt_charge_fault:%d, rfu:%d\n", flags8, batt_power_state->batt_present,
+                           batt_power_state->wired_ext_pwr_connected, batt_power_state->wireless_ext_pwr_connected, batt_power_state->batt_charge_state,
+                           batt_power_state->batt_charge_level, batt_power_state->batt_charge_type, batt_power_state->batt_charge_fault, batt_power_state->rfu);
+
+            WICED_BT_TRACE("identifier:%d  battery_level:%d service_required:%d rfu:%d\n\n", identifier, battery_level,
+                            batt_add_status->service_required, batt_add_status->rfu );
+
+
+            break;
+        }
+    case UUID_CHARACTERISTIC_BATTERY_ESTIMATED_SERVICE_DATE:
+        {
+            // okay to cast p_date into batt_estimated_service_date_t as no flags field or optional fields
+            batt_estimated_service_date_t  *p_date = (batt_estimated_service_date_t *) p_data->data.p_data;
+            uint32_t date = 0;
+            uint8_t *buffer = (uint8_t *) p_date->estimated_service_date;
+            STREAM_TO_UINT24(date, buffer);
+            WICED_BT_TRACE("ESTIMATED_SERVICE_DATE:%d  %s \n\n", date, msg );
+            break;
+        }
+    case UUID_CHARACTERISTIC_BATTERY_CRITICAL_STATUS:
+        {
+            // same as above - no flags field or optional fields
+            batt_critical_status_t  *p_critical = (batt_critical_status_t *) p_data->data.p_data;
+            WICED_BT_TRACE("CRITICAL_STATUS:%s critical_power_state:%d immediate_service_required:%d critical_status.rfu:%d\n\n",  msg,
+            p_critical->batt_critical_status.critical_power_state,  p_critical->batt_critical_status.immediate_service_required, p_critical->batt_critical_status.rfu );
+            break;
+        }
+    case UUID_CHARACTERISTIC_BATTERY_ENERGY_STATUS:
+        {
+            UINT16 external_source_power = 0, present_voltage = 0, available_energy = 0;
+            UINT16 available_power_capacity = 0, change_rate = 0, available_energy_at_last_change = 0;
+
+            // batt_energy_status_t *p_energy = (batt_energy_status_t *) p_data->data.p_data;
+            STREAM_TO_UINT8(flags8, p_data->data.p_data);
+            if ( flags8 & BATTERY_ENERGY_STATUS_FLAG_EXT_SOURCE_PRESENT )
+            {
+                STREAM_TO_UINT16( external_source_power, p_data->data.p_data );
+            }
+            if ( flags8 & BATTERY_ENERGY_STATUS_FLAG_PRESENT_VOLTAGE_PRESENT )
+            {
+                STREAM_TO_UINT16( present_voltage, p_data->data.p_data );
+            }
+            if ( flags8 & BATTERY_ENERGY_STATUS_FLAG_AVAILABLE_ENERGY_PRESENT )
+            {
+                STREAM_TO_UINT16( available_energy, p_data->data.p_data );
+            }
+            if ( flags8 & BATTERY_ENERGY_STATUS_FLAG_AVAILABLE_ENERGY_CAPACITY_PRESENT )
+            {
+                STREAM_TO_UINT16( available_power_capacity, p_data->data.p_data );
+            }
+             if ( flags8 & BATTERY_ENERGY_STATUS_FLAG_CHANGE_RATE_PRESENT )
+            {
+                STREAM_TO_UINT16( change_rate, p_data->data.p_data );
+            }
+            if ( flags8 & BATTERY_ENERGY_STATUS_FLAG_ENERGY_AT_LAST_CHANGE_PRESENT )
+            {
+                STREAM_TO_UINT16( available_energy_at_last_change, p_data->data.p_data );
+            }
+            WICED_BT_TRACE("BATTERY_ENERGY_STATUS:%s flags8:%d external_source_power:%d present_voltage:%d \n\n",
+                            msg, flags8, external_source_power, present_voltage);
+            WICED_BT_TRACE("available_energy:%d  available_power_capacity:%d change_rate:%d  available_energy_at_last_change:%d \n",
+                            available_energy, available_power_capacity,  change_rate, available_energy_at_last_change );
+            break;
+        }
+    case UUID_CHARACTERISTIC_BATTERY_TIME_STATUS:
+        {
+            UINT32  time_until_discharged = 0,  time_until_discharged_on_standby = 0, time_until_recharged = 0;
+            //batt_time_status_t *p_time = (batt_time_status_t *)p_data->data.p_data;
+            STREAM_TO_UINT8(flags8, p_data->data.p_data);
+            STREAM_TO_UINT24( time_until_discharged, p_data->data.p_data );
+
+            if ( flags8 & BATTERY_TIME_STATUS_FLAG_TIME_DISCHARGED_ON_STANDBY_PRESENT )
+            {
+                STREAM_TO_UINT24( time_until_discharged_on_standby, p_data->data.p_data );
+            }
+            if ( flags8 & BATTERY_TIME_STATUS_FLAG_TIME_UNTIL_RECHARGED_PRESENT )
+            {
+                STREAM_TO_UINT24( time_until_recharged, p_data->data.p_data );
+            }
+
+            WICED_BT_TRACE("TIME_STATUS:%s flags8:%d time_until_discharged:%d time_until_discharged_on_standby:%d time_until_recharged:%d\n\n",
+                            msg, flags8, time_until_discharged, time_until_discharged_on_standby, time_until_recharged);
+            break;
+        }
+    case UUID_CHARACTERISTIC_BATTERY_HEALTH_STATUS:
+        {
+            UINT8   health_summary = 0, current_temp = 0;
+            UINT16  cycle_count = 0, deep_discharge_count = 0;
+
+            //batt_health_status_t *p_health = (batt_health_status_t *)p_data->data.p_data;
+            STREAM_TO_UINT8(flags8, p_data->data.p_data);
+
+            if ( flags8 & BATTERY_HEALTH_STATUS_FLAG_SUMMARY_PRESENT )
+            {
+                STREAM_TO_UINT8( health_summary, p_data->data.p_data );
+            }
+
+            if ( flags8 & BATTERY_HEALTH_STATUS_FLAG_CYCLE_COUNT_PRESENT )
+            {
+                STREAM_TO_UINT16( cycle_count, p_data->data.p_data );
+            }
+            if ( flags8 & BATTERY_HEALTH_STATUS_FLAG_CURRENT_TEMP_PRESENT )
+            {
+                STREAM_TO_UINT8( current_temp, p_data->data.p_data );
+            }
+
+            if ( flags16 & BATTERY_HEALTH_STATUS_FLAG_DEEP_DISCHARGE_COUNT_PRESENT )
+            {
+                STREAM_TO_UINT16( deep_discharge_count, p_data->data.p_data );
+            }
+
+            WICED_BT_TRACE("HEALTHSTATUS:%s flags16:%d health_summary:%d cycle_count:%d current_temp:%d deep_discharge_count:%d \n\n", msg, flags16,
+                           health_summary, cycle_count, current_temp, deep_discharge_count);
+            break;
+        }
+    case UUID_CHARACTERISTIC_BATTERY_HEALTH_INFO:
+        {
+            //batt_health_info_t *p_health = (batt_health_info_t *)p_data->data.p_data;
+            UINT16 cycle_count = 0;
+            UINT8 min_op_temp = 0, max_op_temp = 0;
+            STREAM_TO_UINT8(flags8, p_data->data.p_data);
+
+            if ( flags8 & BATTERY_HEALTH_INFO_CYCLE_COUNT_DESIGNED_LIFETIME_PRESENT )
+            {
+                STREAM_TO_UINT16( cycle_count, p_data->data.p_data );
+            }
+
+            if ( flags8 & BATTERY_HEALTH_INFO_MIN_DESIGNED_OP_TEMP_PRESENT )
+            {
+                STREAM_TO_UINT8( min_op_temp, p_data->data.p_data );
+                STREAM_TO_UINT8( max_op_temp, p_data->data.p_data );
+            }
+
+            WICED_BT_TRACE("HEALTH_STATUS:%s flags:%d cycle_count :%d min__op_temp:%d max_op_temp:%d \n\n", msg,
+                            flags8, cycle_count, min_op_temp, max_op_temp );
+            break;
+        }
+    case UUID_CHARACTERISTIC_BATTERY_INFO:
+        {
+            UINT8    features = 0, batt_aggr_grp = 0, batt_chemistry = 0;
+            UINT32   batt_manuf_date = 0, batt_expr_date = 0;
+            UINT16 batt_designed_cap = 0, batt_low_energy = 0, batt_critical_energy = 0, batt_nominal_volage = 0;
+
+            STREAM_TO_UINT16(flags16, p_data->data.p_data);
+            STREAM_TO_UINT8(features, p_data->data.p_data);
+            batt_features_t *batt_features = (batt_features_t *)&features;
+
+            //batt_info_t *p_info = (batt_info_t *)p_data->data.p_data;
+            if ( flags16 & BATTERY_INFO_FLAG_BATT_MANUF_DATE_PRESENT )
+            {
+                STREAM_TO_UINT24( batt_manuf_date, p_data->data.p_data );
+            }
+            if ( flags16 & BATTERY_INFO_FLAG_BATT_EXPRATION_DATE_PRESENT )
+            {
+                STREAM_TO_UINT24( batt_expr_date, p_data->data.p_data );
+            }
+            if ( flags16 & BATTERY_INFO_FLAG_BATT_DESIGNED_CAP_PRESENT )
+            {
+                STREAM_TO_UINT16( batt_designed_cap, p_data->data.p_data );
+            }
+            if ( flags16 & BATTERY_INFO_FLAG_BATT_LOW_ENGERGY_PRESENT )
+            {
+                STREAM_TO_UINT16( batt_low_energy, p_data->data.p_data );
+            }
+            if ( flags16 & BATTERY_INFO_FLAG_BATT_CRITICAL_ENERGY_PRESENT )
+            {
+                STREAM_TO_UINT16( batt_critical_energy, p_data->data.p_data );
+            }
+            if ( flags16 & BATTERY_INFO_FLAG_BATT_CHEMISTRY_PRESENT )
+            {
+                STREAM_TO_UINT8( batt_chemistry, p_data->data.p_data )
+            }
+            if ( flags16 & BATTERY_INFO_FLAG_NOMINAL_VOLTAGE_PRESENT )
+            {
+                STREAM_TO_UINT16( batt_nominal_volage, p_data->data.p_data );
+            }
+            if ( flags16 & BATTERY_INFO_FLAG_BATT_AGGR_GRP_PRESENT )
+            {
+                STREAM_TO_UINT8( batt_aggr_grp, p_data->data.p_data )
+            }
+
+            WICED_BT_TRACE("BATTERY INFO:[%5s] flags16:%d battery_features:%02X battery_replace:%d battery_recharge:%d batt_features_rfu:%d \n",
+                            msg, flags16, features, batt_features->batt_replaceable, batt_features->batt_rechargeable, batt_features->rfu);
+            WICED_BT_TRACE("batt_manuf_date:%d batt_expr_date:%d  batt_designed_cap:%d batt_low_energy:%d batt_critical_energy:%d \n",
+                            batt_manuf_date, batt_expr_date, batt_designed_cap, batt_low_energy, batt_critical_energy);
+            WICED_BT_TRACE("batt_chemistry:%d batt_nominal_volage:%d batt_aggr_grp:%d \n\n",
+                            batt_chemistry, batt_nominal_volage, batt_aggr_grp);
+            break;
+        }
     case UUID_CHARACTERISTIC_BATTERY_MANUFACTURE_NAME:
-    case UUID_CHARACTERISTIC_BATTERY_MANUFACTURE_NUMBER:
-    case UUID_CHARACTERISTIC_BATTERY_SERIAL_NUMBER:
         p_data->data.p_data[p_data->data.len] = 0; // terminate string
-        WICED_BT_TRACE("[%13s] %s: \"%s\"\n",  msg, wiced_bt_battery_client_uuid_to_str(p_data->data.uuid), p_data->data.p_data);
+        WICED_BT_TRACE("MANUFACTURE NAME [%13s]:%s \n\n",  msg, p_data->data.p_data );
         break;
+    case UUID_CHARACTERISTIC_BATTERY_MANUFACTURE_NUMBER:
+        p_data->data.p_data[p_data->data.len] = 0;
+        WICED_BT_TRACE("MODEL NUMBER [%13s]:%s \n\n",  msg, p_data->data.p_data );
+        break;
+    case UUID_CHARACTERISTIC_BATTERY_SERIAL_NUMBER:
+        p_data->data.p_data[p_data->data.len] = 0;
+        WICED_BT_TRACE("SERIAL NUMBER [%13s]: %s \n\n",  msg, p_data->data.p_data );
+        break;
+#endif
 
     default:
-        WICED_BT_TRACE("[%13s] Battery %s:", msg, wiced_bt_battery_client_uuid_to_str(p_data->data.uuid));
+        WICED_BT_TRACE("DEFAULT [%13s] Battery %s:", msg, wiced_bt_battery_client_uuid_to_str(p_data->data.uuid));
         battery_client_out_bytes("", p_data->data.len, p_data->data.p_data);
         break;
     }
@@ -234,15 +517,16 @@ wiced_bt_gatt_status_t battery_client_gatt_discovery_result(wiced_bt_gatt_discov
             {
                 if (p_data->discovery_data.group_value.service_type.len == LEN_UUID_16 )
                 {
-//                    WICED_BT_TRACE("uuid:%04x start_handle:%04x end_handle:%04x\n",
-//                            p_data->discovery_data.group_value.service_type.uu.uuid16,
-//                            p_data->discovery_data.group_value.s_handle,
-//                            p_data->discovery_data.group_value.e_handle);
-                    if( p_data->discovery_data.group_value.service_type.uu.uuid16 == UUID_SERVICE_BATTERY )
-                    {
-//                        WICED_BT_TRACE("Battery Service found s:%04x e:%04x\n",
-//                                p_data->discovery_data.group_value.s_handle,
-//                                p_data->discovery_data.group_value.e_handle);
+  //                 WICED_BT_TRACE("uuid:%04x start_handle:%04x end_handle:%04x\n",
+  //                         p_data->discovery_data.group_value.service_type.uu.uuid16,
+  //                         p_data->discovery_data.group_value.s_handle,
+  //                         p_data->discovery_data.group_value.e_handle);
+                   if( (p_data->discovery_data.group_value.service_type.uu.uuid16 == UUID_SERVICE_BATTERY)  && (battery_service_found != 1) )
+                   {
+                       battery_service_found = 1; // ignore any more battery services, connect to first discovered one
+  //                     WICED_BT_TRACE("Battery Service found s:%04x e:%04x\n",
+  //                             p_data->discovery_data.group_value.s_handle,
+  //                             p_data->discovery_data.group_value.e_handle);
                         battery_client_app_state.bac_s_handle = p_data->discovery_data.group_value.s_handle;
                         battery_client_app_state.bac_e_handle = p_data->discovery_data.group_value.e_handle;
                     }
@@ -270,6 +554,7 @@ static wiced_bt_gatt_status_t battery_client_connection_up( wiced_bt_gatt_connec
     uint8_t dev_role;
     wiced_bt_dev_status_t status ;
     wiced_bt_ble_sec_action_type_t  encryption_type = BTM_BLE_SEC_ENCRYPT;
+    battery_service_found = 0;
 
     wiced_bt_dev_get_role( p_conn_status->bd_addr, &dev_role, BT_TRANSPORT_LE );
 
@@ -287,6 +572,10 @@ static wiced_bt_gatt_status_t battery_client_connection_up( wiced_bt_gatt_connec
     battery_client_app_state.bac_s_handle = 0;
     battery_client_app_state.bac_e_handle = 0;
 
+#ifdef TEST_HCI_CONTROL
+    battery_client_hci_send_connect_event( p_conn_status->addr_type, p_conn_status->bd_addr, p_conn_status->conn_id, dev_role );
+#endif
+
     // perform primary service search
     status = wiced_bt_util_send_gatt_discover( p_conn_status->conn_id, GATT_DISCOVER_SERVICES_ALL, UUID_ATTRIBUTE_PRIMARY_SERVICE, 1, 0xffff);
     WICED_BT_TRACE("start discover status:%d\n", status);
@@ -302,6 +591,10 @@ static wiced_bt_gatt_status_t battery_client_connection_down( wiced_bt_gatt_conn
     battery_client_app_state.discovery_state = BAC_DISCOVERY_STATE_SERVICE;
     battery_client_app_state.bac_s_handle = 0;
     battery_client_app_state.bac_e_handle = 0;
+
+#ifdef TEST_HCI_CONTROL
+    battery_client_hci_send_disconnect_event( p_conn_status->reason, p_conn_status->conn_id );
+#endif
 
     wiced_bt_battery_client_connection_down( p_conn_status );
 
@@ -381,8 +674,11 @@ wiced_bt_gatt_status_t battery_client_gatt_operation_complete(wiced_bt_gatt_oper
 #ifdef ENABLE_HCI_TRACE
 static void battery_client_hci_trace_cback( wiced_bt_hci_trace_type_t type, uint16_t length, uint8_t* p_data )
 {
-    //send the trace
-    _wiced_transport_send_hci_trace( type, p_data, length );
+#if BTSTACK_VER >= 0x03000001
+    wiced_transport_send_hci_trace( type, p_data, length );
+#else
+    wiced_transport_send_hci_trace( NULL, type, length, p_data );
+#endif
 }
 #endif
 
@@ -436,6 +732,11 @@ static void battery_client_app_init()
 
     /* Load the address resolution DB with the keys stored in the NVRAM */
     battery_client_load_keys_to_addr_resolution_db();
+
+#ifdef BATTERY_LEVEL_BROADCAST
+    wicked_bt_battery_client_server_characterstic_handle = 0;
+#endif
+    battery_client_app_data.conn_id = 0;
 }
 
 /*
@@ -445,20 +746,55 @@ static void battery_client_scan_result_cback( wiced_bt_ble_scan_results_t *p_sca
 {
     wiced_result_t          status;
     wiced_bool_t            ret_status;
-    uint8_t                 length;
+    uint8_t                 length = 0;
     uint8_t *               p_data;
     uint16_t                service_uuid16=0;
 
     if ( p_scan_result )
     {
+
+#ifdef BATTERY_LEVEL_BROADCAST
+        // check to see if the advertisement is battery level broadcast
+        p_data = wiced_bt_ble_check_advertising_data( p_adv_data, BTM_BLE_ADVERT_TYPE_SERVICE_DATA, &length );
+        if ( p_data != NULL )
+        {
+            WICED_BT_TRACE( "Broadcast advertisement with length %d\n", length);
+
+            uint8_t len = 0, battery_level = 0, rfu = 0;
+            uint16_t flags = 0, identifier = 0;
+
+            STREAM_TO_UINT16( service_uuid16, p_data );
+            STREAM_TO_UINT8( len, p_data );
+
+            if ( (service_uuid16 == UUID_SERVICE_BATTERY) /*&& (len == 7) */) // len = uuid(2) + battry level(1)
+            {
+                STREAM_TO_UINT16( flags, p_data );
+                STREAM_TO_UINT16( identifier, p_data );
+
+                STREAM_TO_UINT8( battery_level, p_data );
+                STREAM_TO_UINT8( rfu, p_data );
+                WICED_BT_TRACE( "Broadcast advertisement with len:%d flags:%02X identifier:%02X level:%d rfu:%d \n",
+                                 len, flags, identifier, battery_level, rfu );
+            }
+            return;     // safe to return from here as the broadcast adv packet not used for connection purpose
+
+        }
+#endif
+        if ( battery_client_app_data.conn_id )
+        {
+            // return if connected to a server already
+            return;
+        }
         // Search for SERVICE_UUID_16 element in the Advertisement data received.Check for both
         // complete and partial list
         p_data = wiced_bt_ble_check_advertising_data( p_adv_data, BTM_BLE_ADVERT_TYPE_16SRV_COMPLETE, &length );
         if ( p_data == NULL )
         {
             p_data = wiced_bt_ble_check_advertising_data( p_adv_data, BTM_BLE_ADVERT_TYPE_16SRV_PARTIAL, &length );
-            if (p_data == NULL)
+
+            if (p_data == NULL){
                 return;     // No UUID_16 element
+            }
         }
 
         while (length >= LEN_UUID_16)
@@ -486,12 +822,12 @@ static void battery_client_scan_result_cback( wiced_bt_ble_scan_results_t *p_sca
         WICED_BT_TRACE( "scan off status %d\n", status );
 
         /* Initiate the connection */
-        ret_status = wiced_bt_gatt_le_connect( p_scan_result->remote_bd_addr, p_scan_result->ble_addr_type, BLE_CONN_MODE_HIGH_DUTY, TRUE );
+        ret_status = wiced_bt_gatt_le_connect( p_scan_result->remote_bd_addr, p_scan_result->ble_addr_type, BLE_CONN_MODE_LOW_DUTY, TRUE );
         WICED_BT_TRACE( "wiced_bt_gatt_connect status %d\n", ret_status );
     }
     else
     {
-        WICED_BT_TRACE( "Scan completed:\n" );
+        //WICED_BT_TRACE( "Scan completed:\n" );
     }
 }
 
@@ -505,6 +841,10 @@ static void battery_client_enter_pairing()
     {
         result = wiced_bt_ble_scan( BTM_BLE_SCAN_TYPE_HIGH_DUTY, WICED_TRUE, battery_client_scan_result_cback );
         WICED_BT_TRACE("wiced_bt_ble_scan: %d \n", result);
+    }
+    else
+    {
+         WICED_BT_TRACE("Scanning not initiated, scan in progress ??  \n");
     }
 }
 
@@ -531,8 +871,19 @@ static void battery_client_interrupt_handler( void *user_data, uint8_t value )
         uint32_t duration = bac_app_timer_count - button_pushed_time;
         WICED_BT_TRACE("User button released, duration=%d\n", duration);
 
+#ifdef BATTERY_LEVEL_BROADCAST
+        if(duration >= 8)
+        {
+            WICED_BT_TRACE("BROADCAST toggle Button\n");
+            // Toggle broadcast flag on the sever
+            is_broadcast_enabled = ( is_broadcast_enabled == WICED_TRUE ) ? WICED_FALSE : WICED_TRUE;
+            battery_client_gatts_enable_broadcast ( battery_client_app_data.conn_id, wicked_bt_battery_client_server_characterstic_handle, is_broadcast_enabled );
+        }
+        else
+#endif
         if ( duration > 5 )
         {
+            WICED_BT_TRACE("BAC Client enabled button.\n");
             battery_client_enable(!is_bas_enabled);
         }
         else if(duration >= 3)
@@ -540,8 +891,9 @@ static void battery_client_interrupt_handler( void *user_data, uint8_t value )
             WICED_BT_TRACE("BAC Read\n");
             wiced_bt_battery_client_read( battery_client_app_data.conn_id );
         }
-        else
+        else if( ! battery_client_app_data.conn_id )
         {
+            WICED_BT_TRACE("BAC enter pairing button.\n");
             battery_client_enter_pairing();
         }
         button_pushed_time = APP_TIMER_IDLE;
@@ -549,7 +901,7 @@ static void battery_client_interrupt_handler( void *user_data, uint8_t value )
 }
 
 /* The function invoked on timeout of app seconds timer. */
-static void battery_client_app_timer( uint32_t arg )
+static void battery_client_app_timer( TIMER_PARAM_TYPE arg )
 {
     bac_app_timer_count++;
 
@@ -564,8 +916,13 @@ static void battery_client_app_timer( uint32_t arg )
             WICED_BT_TRACE("Release now to perform BAS Read\n");
             break;
         case 6:
-            WICED_BT_TRACE("Release to %s BAS\n", is_bas_enabled ? "disable" : "enable");
+            WICED_BT_TRACE("Release now to %s BAS\n", is_bas_enabled ? "disable" : "enable");
             break;
+#ifdef BATTERY_LEVEL_BROADCAST
+        case 8:
+            WICED_BT_TRACE("Release now to %s broadcast\n", (is_broadcast_enabled) ? "enable" : "disable" );
+            break;
+#endif
         }
     }
     else
@@ -573,6 +930,17 @@ static void battery_client_app_timer( uint32_t arg )
 //        if ((bac_app_timer_count % 10) == 0)
 //            WICED_BT_TRACE("%d \n", bac_app_timer_count);
     }
+
+#ifdef BATTERY_LEVEL_BROADCAST
+    /* Connected or not, scan for battery level advertisements, if not already scanning  */
+    if ( wiced_bt_ble_get_current_scan_state() == BTM_BLE_SCAN_TYPE_NONE  )
+    {
+        //wiced_bt_ble_scan( BTM_BLE_SCAN_TYPE_HIGH_DUTY, WICED_TRUE, battery_client_scan_result_cback );
+        wiced_bt_ble_observe (WICED_TRUE, 3, battery_client_scan_result_cback);
+        //WICED_BT_TRACE("Scanning for battery level advertisements %d\n", bac_app_timer_count);
+    }
+#endif
+
 }
 
 static void battery_client_set_input_interrupt(void)
@@ -588,6 +956,7 @@ static void battery_client_set_input_interrupt(void)
     /* Starting the app timer */
     wiced_init_timer(&bac_app_timer, battery_client_app_timer, 0, WICED_SECONDS_PERIODIC_TIMER);
     wiced_start_timer(&bac_app_timer,BATTC_APP_TIMEOUT_IN_SECONDS);
+    WICED_BT_TRACE( "App timer started\n" );
 }
 
 static wiced_bool_t battery_client_save_link_keys( wiced_bt_device_link_keys_t *p_keys )
@@ -831,11 +1200,14 @@ APPLICATION_START( )
     // Set to HCI to see traces on HCI uart - default if no call to wiced_set_debug_uart()
     // wiced_set_debug_uart( WICED_ROUTE_DEBUG_TO_HCI_UART );
 
+#ifdef ENABLE_HCI_TRACE
     // Use WICED_ROUTE_DEBUG_TO_WICED_UART to send formatted debug strings over the WICED
     // HCI debug interface to be parsed by ClientControl/BtSpy.
     // Note: WICED HCI must be configured to use this - see wiced_trasnport_init(), must
     // be called with wiced_transport_cfg_t.wiced_trbasort_data_handler_t callback present
-    // wiced_set_debug_uart(WICED_ROUTE_DEBUG_TO_WICED_UART);
+    wiced_set_debug_uart(WICED_ROUTE_DEBUG_TO_WICED_UART);
+#endif
+
 #endif
 
 #ifdef BAS_1_1
@@ -852,3 +1224,195 @@ APPLICATION_START( )
     // Register call back and configuration with stack
     app_stack_init();
 }
+
+
+
+#ifdef TEST_HCI_CONTROL
+/*
+ *  transfer connection event to uart
+ */
+void battery_client_hci_send_connect_event( uint8_t addr_type, BD_ADDR addr, uint16_t con_handle, uint8_t role )
+{
+
+    int i;
+    uint8_t   tx_buf [30];
+    uint8_t   *p = tx_buf;
+
+    *p++ = addr_type;
+    for ( i = 0; i < 6; i++ )
+        *p++ = addr[5 - i];
+    *p++ = con_handle & 0xff;
+    *p++ = ( con_handle >> 8 ) & 0xff;
+    *p++ = role;
+
+    wiced_transport_send_data ( HCI_CONTROL_BATT_CLIENT_EVENT_CONNECTED, tx_buf, ( int )( p - tx_buf ) );
+}
+
+
+void battery_client_hci_handle_get_version(void)
+{
+    uint8_t   tx_buf[20];
+    uint8_t   cmd = 0;
+
+// If this is 20819 or 20820, we do detect the device from hardware
+#define RADIO_ID    0x006007c0
+#define RADIO_20820 0x80
+#define CHIP_20820  20820
+#define CHIP_20819  20819
+#if (CHIP==CHIP_20819) || (CHIP==CHIP_20820)
+    uint32_t chip = CHIP_20819;
+    if (*(UINT32*) RADIO_ID & RADIO_20820)
+    {
+        chip = CHIP_20820;
+    }
+#else
+    uint32_t  chip = CHIP;
+#endif
+
+    tx_buf[cmd++] = WICED_SDK_MAJOR_VER;
+    tx_buf[cmd++] = WICED_SDK_MINOR_VER;
+    tx_buf[cmd++] = WICED_SDK_REV_NUMBER;
+    tx_buf[cmd++] = WICED_SDK_BUILD_NUMBER & 0xFF;
+    tx_buf[cmd++] = (WICED_SDK_BUILD_NUMBER>>8) & 0xFF;
+    tx_buf[cmd++] = chip & 0xFF;
+    tx_buf[cmd++] = (chip>>8) & 0xFF;
+    tx_buf[cmd++] = (chip>>24) & 0xFF;
+    tx_buf[cmd++] = 0; // not used
+
+    uint8_t  addr[]         = {0x0A, 0X0B, 0xC, 0x0D, 0x0E, 0X0F};
+
+    /* Send MCU app the supported features */
+    tx_buf[cmd++] = HCI_CONTROL_GROUP_BATT_CLIENT;
+
+    wiced_transport_send_data(HCI_CONTROL_MISC_EVENT_VERSION, tx_buf, cmd);
+
+   if ( battery_client_app_data.conn_id != 0 )
+   {
+        // if connected already, simply send connection details. else one shall be sent when connected
+        battery_client_hci_send_connect_event( 1, addr, battery_client_app_data.conn_id, 1 );
+    }
+
+}
+
+/* transport status */
+void battery_client_hci_transport_status( wiced_transport_type_t type )
+{
+    WICED_BT_TRACE("battery_client_transport connected type: %d ", type);
+}
+
+/*
+ *  transfer disconnection event to UART
+ */
+void battery_client_hci_send_disconnect_event( uint8_t reason, uint16_t con_handle )
+{
+    uint8_t   tx_buf [3];
+    uint8_t   *p = tx_buf;
+
+    *p++ = con_handle & 0xff;
+    *p++ = ( con_handle >> 8 ) & 0xff;
+    *p++ = reason;
+
+    wiced_transport_send_data ( HCI_CONTROL_BATT_CLIENT_EVENT_DISCONNECTED, tx_buf, ( int )( p - tx_buf ) );
+}
+
+#ifdef BAS_1_1
+static wiced_bt_gatt_status_t  battery_client_hci_handle_broadcast_modify( wiced_bool_t enable )
+{
+    WICED_BT_TRACE("HCI Control broadcast toggle cmd\n");
+
+    if( battery_client_app_data.conn_id )
+    {
+        battery_client_gatts_enable_broadcast ( battery_client_app_data.conn_id, wicked_bt_battery_client_server_characterstic_handle, enable );
+        is_broadcast_enabled = enable;
+    }
+    else
+    {
+        WICED_BT_TRACE("Not connected to the battery server to enable/disable broadcasts \n");
+    }
+
+    return WICED_BT_GATT_SUCCESS;
+}
+#endif
+
+uint32_t  battery_client_hci_rx_cmd( uint8_t *p_buffer, uint32_t length )
+{
+    uint16_t                opcode;
+    uint8_t*                p_data = p_buffer;
+    uint16_t                payload_len;
+    uint8_t                 status = HCI_CONTROL_STATUS_SUCCESS;
+    wiced_bt_gatt_status_t  gatt_status = WICED_BT_GATT_SUCCESS;
+    uint8_t  addr[]         = {0x0A, 0X0B, 0xC, 0x0D, 0x0E, 0X0F};
+
+    WICED_BT_TRACE("hci_control_proc_rx_cmd:%d\n", length);
+
+    if ( !p_data )
+    {
+        return HCI_CONTROL_STATUS_INVALID_ARGS;
+    }
+
+    //Expected minimum 4 byte as the wiced header
+    if (length < 4)
+    {
+        WICED_BT_TRACE( "invalid params\n" );
+        wiced_transport_free_buffer( p_data );
+        return HCI_CONTROL_STATUS_INVALID_ARGS;
+    }
+    else
+    {
+
+        STREAM_TO_UINT16(opcode, p_data);  // Get OpCod
+        STREAM_TO_UINT16(payload_len, p_data);  // Gen Payload Length
+        WICED_BT_TRACE("cmd_opcode 0x%02x payload_len %d \n", opcode, payload_len);
+
+        switch ( opcode )
+        {
+
+            case HCI_CONTROL_BATT_CLIENT_COMMAND_CONNECT:
+                WICED_BT_TRACE("HCI_CONTROL_BATT_CLIENT_COMMAND_CONNECT\n");
+
+                if ( battery_client_app_data.conn_id != 0 )
+                {
+                    // if connected already, simply send connection details. else one shall be sent when connected
+                    battery_client_hci_send_connect_event( 1, addr, battery_client_app_data.conn_id, 1 );
+                }
+                break;
+
+            case HCI_CONTROL_BATT_CLIENT_COMMAND_DISCONNECT:
+                WICED_BT_TRACE("HCI_CONTROL_BATT_CLIENT_COMMAND_DISCONNECT\n");
+                break;
+#ifdef BAS_1_1
+            case HCI_CONTROL_BATT_CLIENT_COMMAND_ENABLE_BROADCAST:
+                WICED_BT_TRACE("HCI_CONTROL_BATT_CLIENT_COMMAND_ENABLE_BROADCAST\n");
+                battery_client_hci_handle_broadcast_modify( WICED_TRUE );
+                break;
+
+            case HCI_CONTROL_BATT_CLIENT_COMMAND_DISABLE_BROADCAST:
+                WICED_BT_TRACE("HCI_CONTROL_BATT_CLIENT_COMMAND_DISABLE_BROADCAST\n");
+                battery_client_hci_handle_broadcast_modify( WICED_FALSE );
+                break;
+#endif
+            case HCI_CONTROL_BATT_CLIENT_COMMAND_BAS_READ:
+                WICED_BT_TRACE("HCI_CONTROL_BATT_CLIENT_COMMAND_BAS_READ\n");
+                wiced_bt_battery_client_read(battery_client_app_data.conn_id);
+                break;
+
+            case HCI_CONTROL_MISC_COMMAND_GET_VERSION:
+             WICED_BT_TRACE("HCI_CONTROL_MISC_COMMAND_GET_VERSION\n");
+                battery_client_hci_handle_get_version();
+                break;
+
+            default:
+                WICED_BT_TRACE("ignored:%02X payload_len:%d \n", opcode, payload_len);
+                status = HCI_CONTROL_STATUS_UNKNOWN_COMMAND;
+                break;
+            }
+    }
+
+    wiced_transport_send_data(HCI_CONTROL_BATT_CLIENT_EVENT_STATUS, &status, 1);
+
+    // Freeing the buffer in which data is received
+    wiced_transport_free_buffer( p_buffer );
+    return HCI_CONTROL_STATUS_SUCCESS;
+}
+
+#endif
