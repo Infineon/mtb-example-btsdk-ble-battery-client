@@ -486,7 +486,7 @@ wiced_bt_gatt_status_t battery_client_gatt_discovery_complete(wiced_bt_gatt_disc
         {
             WICED_BT_TRACE("bac handles:%04x-%04x\n", battery_client_app_state.bac_s_handle, battery_client_app_state.bac_e_handle);
 
-            /* If bac Service found tell WICED BT bac library to start its discovery */
+            /* If bac Service found tell AIROC Bluetooth bac library to start its discovery */
             if ((battery_client_app_state.bac_s_handle != 0) && (battery_client_app_state.bac_e_handle != 0))
             {
                 battery_client_app_state.discovery_state = BAC_DISCOVERY_STATE_CHAR;
@@ -567,7 +567,7 @@ static wiced_bt_gatt_status_t battery_client_connection_up( wiced_bt_gatt_connec
     // need to notify BAS library that the connection is up
     wiced_bt_battery_client_connection_up( p_conn_status );
 
-        /* Initialize WICED BT bac library Start discovery */
+        /* Initialize AIROC Bluetooth bac library Start discovery */
     battery_client_app_state.discovery_state = BAC_DISCOVERY_STATE_SERVICE;
     battery_client_app_state.bac_s_handle = 0;
     battery_client_app_state.bac_e_handle = 0;
@@ -715,7 +715,7 @@ static void battery_client_app_init()
 {
     wiced_bt_gatt_status_t gatt_status;
 
-#if ( defined(CYW20706A2) || defined(CYW20719B1) || defined(CYW20719B0) || defined(CYW20721B1) || defined(CYW20735B0) || defined(CYW43012C0) )
+#if ( defined(CYW20706A2) || defined(CYW20719B1) || defined(CYW20721B1) || defined(CYW43012C0) )
     /* Initialize wiced app */
     wiced_bt_app_init();
 #endif
@@ -785,6 +785,7 @@ static void battery_client_scan_result_cback( wiced_bt_ble_scan_results_t *p_sca
             // return if connected to a server already
             return;
         }
+
         // Search for SERVICE_UUID_16 element in the Advertisement data received.Check for both
         // complete and partial list
         p_data = wiced_bt_ble_check_advertising_data( p_adv_data, BTM_BLE_ADVERT_TYPE_16SRV_COMPLETE, &length );
@@ -822,7 +823,7 @@ static void battery_client_scan_result_cback( wiced_bt_ble_scan_results_t *p_sca
         WICED_BT_TRACE( "scan off status %d\n", status );
 
         /* Initiate the connection */
-        ret_status = wiced_bt_gatt_le_connect( p_scan_result->remote_bd_addr, p_scan_result->ble_addr_type, BLE_CONN_MODE_LOW_DUTY, TRUE );
+        ret_status = wiced_bt_gatt_le_connect( p_scan_result->remote_bd_addr, p_scan_result->ble_addr_type, BLE_CONN_MODE_HIGH_DUTY, TRUE );
         WICED_BT_TRACE( "wiced_bt_gatt_connect status %d\n", ret_status );
     }
     else
@@ -854,7 +855,7 @@ static void battery_client_interrupt_handler( void *user_data, uint8_t value )
     wiced_bt_gatt_status_t status;
     int button_down;
 
-#if defined(CYW20735B0) || defined(CYW20719B0) || defined(CYW20706A2)
+#if defined(CYW20706A2)
     button_down = wiced_hal_gpio_get_pin_input_status(APP_BUTTON) == BUTTON_PRESSED;
 #else
     button_down = wiced_hal_gpio_get_pin_input_status( WICED_GET_PIN_FOR_BUTTON(WICED_PLATFORM_BUTTON_1) ) == wiced_platform_get_button_pressed_value(WICED_PLATFORM_BUTTON_1);
@@ -945,7 +946,7 @@ static void battery_client_app_timer( TIMER_PARAM_TYPE arg )
 
 static void battery_client_set_input_interrupt(void)
 {
-#if defined(CYW20735B0) || defined(CYW20719B0) || defined(CYW20706A2)
+#if defined(CYW20706A2)
     wiced_hal_gpio_register_pin_for_interrupt( APP_BUTTON, battery_client_interrupt_handler, NULL );
     wiced_hal_gpio_configure_pin( APP_BUTTON, APP_BUTTON_SETTINGS, APP_BUTTON_DEFAULT_STATE );
 #else
@@ -1181,7 +1182,7 @@ wiced_result_t battery_client_management_cback( wiced_bt_management_evt_t event,
 /*
  *  Entry point to the application. Set device configuration and start BT
  *  stack initialization.  The actual application initialization will happen
- *  when stack reports that BT device is ready.
+ *  when stack reports that Bluetooth device is ready.
  */
 APPLICATION_START( )
 {
@@ -1193,7 +1194,7 @@ APPLICATION_START( )
 
     // Set to PUART to see traces on peripheral uart(puart)
     wiced_set_debug_uart( WICED_ROUTE_DEBUG_TO_PUART );
-#if ( defined(CYW20706A2) || defined(CYW20735B0) || defined(CYW20719B0) || defined(CYW43012C0) )
+#if ( defined(CYW20706A2) || defined(CYW43012C0) )
     wiced_hal_puart_select_uart_pads( WICED_PUART_RXD, WICED_PUART_TXD, 0, 0);
 #endif
 
