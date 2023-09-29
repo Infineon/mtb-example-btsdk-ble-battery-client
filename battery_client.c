@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2022, Cypress Semiconductor Corporation (an Infineon company) or
+ * Copyright 2016-2023, Cypress Semiconductor Corporation (an Infineon company) or
  * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
  *
  * This software, including source code, documentation and related
@@ -46,17 +46,23 @@
 * To demonstrate the app, work through the following steps.
 * 1. Plug the AIROC eval board into your computer
 * 2. Build and download the application (to the AIROC board)
-* 3. On start of the application, push the button on the tag board and release with in 2 seconds,so that
-*    Battery Client App scans and connects to the Battery Service Server, which would have
-*    UUID_SERVICE_BATTERY in it's advertisements.
-*    Note:- If no Battery Service Server device is found nearby for 90secs, then scan stops automatically.
-*    To restart the scan, push the button on the tag board and release within 2 secs.
+* 3. On start of the application, push the application button on the board and release after
+*    the message "Release now to start pairing." is displayed in the traces, so that Battery Client App scans
+*    and connects to the Battery Service Server, which would have UUID_SERVICE_BATTERY in it's advertisements.
+*
+*    Note:- If no Battery Service Server device is found nearby for 90 secs, then scan stops automatically.
+*    To restart the scan, push the button on the board and release after the message "Release now to start pairing."
+*    is displayed.
+*
 * 4. Upon successful Connection, the Battery Client App would discover all the characteristics/descriptors
 *    of the server device.
 * 5. Once the connection is established with the LE peripheral (Battery Service found in the Peripheral),
 *    the application can enable/disable for notifications, to receive the change in the battery level.
-*    To enable/disable notifications from the server, push the button on the tag board and release after 5 secs.
-* 6. To read the battery level of the server, push the button on the tag board and release between 2-4 secs.
+*    To enable/disable notifications from the server, push the user button on the board and release after
+*    the message "Release now to enable/disable battery level notifications." is displayed.
+* 6. To read the battery level of the server, push the button on the board and release
+*    after the message "Release now to read battery level." is displayed.
+*
 */
 
 #include "sparcommon.h"
@@ -74,7 +80,8 @@
 #include "hci_control_api.h"
 #include "wiced_timer.h"
 #include "battery_client.h"
-#if !defined(CYW20706A2) && !defined(CYW43012C0)
+// remove 43022C1 after enabling design.modus for it
+#if !defined(CYW20706A2) && !defined(CYW43012C0) && !defined(CYW43022C1)
  #include "cycfg_pins.h"
 #endif
 
@@ -126,7 +133,7 @@ const wiced_transport_cfg_t transport_cfg =
             .baud_rate =  HCI_UART_DEFAULT_BAUD
         },
     },
-#if BTSTACK_VER >= 0x03000001
+#if NEW_DYNAMIC_MEMORY_INCLUDED
     .heap_config =
     {
         .data_heap_size = 1024 * 4 + 1500 * 2,
@@ -473,7 +480,7 @@ wiced_bt_gatt_status_t battery_client_gatt_discovery_complete(wiced_bt_gatt_disc
 {
     wiced_result_t result;
 
-//    WICED_BT_TRACE("[%s] conn %d type %d state %d\n", __FUNCTION__, p_data->conn_id, p_data->disc_type, battery_client_app_state.discovery_state);
+//    WICED_BT_TRACE("[%s] conn %d, discovery type %d, state %d\n", __FUNCTION__, p_data->conn_id, p_data->discovery_type, battery_client_app_state.discovery_state);
 
     switch (battery_client_app_state.discovery_state)
     {
@@ -517,10 +524,11 @@ wiced_bt_gatt_status_t battery_client_gatt_discovery_result(wiced_bt_gatt_discov
             {
                 if (p_data->discovery_data.group_value.service_type.len == LEN_UUID_16 )
                 {
-  //                 WICED_BT_TRACE("uuid:%04x start_handle:%04x end_handle:%04x\n",
-  //                         p_data->discovery_data.group_value.service_type.uu.uuid16,
-  //                         p_data->discovery_data.group_value.s_handle,
-  //                         p_data->discovery_data.group_value.e_handle);
+     //                 WICED_BT_TRACE("uuid:%04x start_handle:%04x end_handle:%04x\n",
+     //                       p_data->discovery_data.group_value.service_type.uu.uuid16,
+     //                        p_data->discovery_data.group_value.s_handle,
+     //                        p_data->discovery_data.group_value.e_handle);
+
                    if( (p_data->discovery_data.group_value.service_type.uu.uuid16 == UUID_SERVICE_BATTERY)  && (battery_service_found != 1) )
                    {
                        battery_service_found = 1; // ignore any more battery services, connect to first discovered one
@@ -674,7 +682,7 @@ wiced_bt_gatt_status_t battery_client_gatt_operation_complete(wiced_bt_gatt_oper
 #ifdef ENABLE_HCI_TRACE
 static void battery_client_hci_trace_cback( wiced_bt_hci_trace_type_t type, uint16_t length, uint8_t* p_data )
 {
-#if BTSTACK_VER >= 0x03000001
+#if NEW_DYNAMIC_MEMORY_INCLUDED
     wiced_transport_send_hci_trace( type, p_data, length );
 #else
     wiced_transport_send_hci_trace( NULL, type, length, p_data );
@@ -737,6 +745,14 @@ static void battery_client_app_init()
     wicked_bt_battery_client_server_characterstic_handle = 0;
 #endif
     battery_client_app_data.conn_id = 0;
+
+#if defined(CYW43022C1)
+    /* Configure LED1 on the platform */
+    // Set WICED_BT_GPIO_03 (J4, pin 7) as LED1 (J11, pin 2) connected to
+    wiced_hal_gpio_select_function(WICED_GPIO_PIN_LED_1, WICED_GPIO);
+    wiced_hal_gpio_configure_pin(WICED_GPIO_PIN_LED_1, GPIO_OUTPUT_ENABLE, GPIO_PIN_OUTPUT_HIGH );
+#endif
+
 }
 
 /*
@@ -853,18 +869,22 @@ static void battery_client_interrupt_handler( void *user_data, uint8_t value )
 {
     wiced_result_t result;
     wiced_bt_gatt_status_t status;
-    int button_down;
+    int button_down = 0;
 
 #if defined(CYW20706A2)
     button_down = wiced_hal_gpio_get_pin_input_status(APP_BUTTON) == BUTTON_PRESSED;
 #else
+#ifdef CYW43022C1
+    button_down = wiced_hal_gpio_get_pin_input_status(WICED_GPIO_04) != BUTTON_PRESSED;
+#else
     button_down = wiced_hal_gpio_get_pin_input_status( WICED_GET_PIN_FOR_BUTTON(WICED_PLATFORM_BUTTON_1) ) == wiced_platform_get_button_pressed_value(WICED_PLATFORM_BUTTON_1);
+#endif
 #endif
 
     if ( ( button_pushed_time == APP_TIMER_IDLE ) && button_down )
     {
         WICED_BT_TRACE("User button down\n"
-                       "Release now to pair\n");
+                       "Release now to start pairing.\n");
         button_pushed_time = bac_app_timer_count;
     }
     else if ( button_pushed_time != APP_TIMER_IDLE )
@@ -882,19 +902,19 @@ static void battery_client_interrupt_handler( void *user_data, uint8_t value )
         }
         else
 #endif
-        if ( duration > 5 )
+        if ( duration >= 5 )
         {
-            WICED_BT_TRACE("BAC Client enabled button.\n");
+            WICED_BT_TRACE("BAC %s battery level notifications.", is_bas_enabled ? "Disabling" : "Enabling\n");
             battery_client_enable(!is_bas_enabled);
         }
         else if(duration >= 3)
         {
-            WICED_BT_TRACE("BAC Read\n");
+            WICED_BT_TRACE("BAC Read battery level.\n");
             wiced_bt_battery_client_read( battery_client_app_data.conn_id );
         }
         else if( ! battery_client_app_data.conn_id )
         {
-            WICED_BT_TRACE("BAC enter pairing button.\n");
+            WICED_BT_TRACE("BAC Enter pairing mode.\n");
             battery_client_enter_pairing();
         }
         button_pushed_time = APP_TIMER_IDLE;
@@ -914,10 +934,10 @@ static void battery_client_app_timer( TIMER_PARAM_TYPE arg )
         switch (duration)
         {
         case 3:
-            WICED_BT_TRACE("Release now to perform BAS Read\n");
+            WICED_BT_TRACE("Release now to read battery level.\n");
             break;
-        case 6:
-            WICED_BT_TRACE("Release now to %s BAS\n", is_bas_enabled ? "disable" : "enable");
+        case 5:
+            WICED_BT_TRACE("Release now to %s battery level notifications.\n", is_bas_enabled ? "disable" : "enable");
             break;
 #ifdef BATTERY_LEVEL_BROADCAST
         case 8:
@@ -925,11 +945,6 @@ static void battery_client_app_timer( TIMER_PARAM_TYPE arg )
             break;
 #endif
         }
-    }
-    else
-    {
-//        if ((bac_app_timer_count % 10) == 0)
-//            WICED_BT_TRACE("%d \n", bac_app_timer_count);
     }
 
 #ifdef BATTERY_LEVEL_BROADCAST
@@ -950,8 +965,16 @@ static void battery_client_set_input_interrupt(void)
     wiced_hal_gpio_register_pin_for_interrupt( APP_BUTTON, battery_client_interrupt_handler, NULL );
     wiced_hal_gpio_configure_pin( APP_BUTTON, APP_BUTTON_SETTINGS, APP_BUTTON_DEFAULT_STATE );
 #else
+#if defined(CYW43022C1)
+    /* Configure buttons available on the platform */
+    // Set WICED_BT_GPIO_04 (J4, pin SDA) as User button (J12, pin 1) connected to
+    wiced_hal_gpio_select_function(WICED_GPIO_PIN_BUTTON_1, WICED_GPIO);
+    wiced_hal_gpio_configure_pin(WICED_GPIO_PIN_BUTTON_1, GPIO_INPUT_ENABLE | WICED_GPIO_EN_INT_BOTH_EDGE, 1);
+    wiced_hal_gpio_register_pin_for_interrupt(WICED_GPIO_PIN_BUTTON_1, battery_client_interrupt_handler, NULL);
+#else
     /* Configure buttons available on the platform */
     wiced_platform_register_button_callback( WICED_PLATFORM_BUTTON_1, battery_client_interrupt_handler, NULL, WICED_PLATFORM_BUTTON_BOTH_EDGE);
+#endif
 #endif
 
     /* Starting the app timer */
@@ -1192,8 +1215,21 @@ APPLICATION_START( )
     // Set the debug uart as WICED_ROUTE_DEBUG_NONE to get rid of prints
     // wiced_set_debug_uart(WICED_ROUTE_DEBUG_NONE);
 
+#if defined(CYW43022C1)
+    // 43022 transport clock rate is 24Mhz for baud rates <= 1.5 Mbit/sec, and 48Mhz for baud rates > 1.5 Mbit/sec.
+    // HCI UART and Debug UART both use the Transport clock, so if the HCI UART rate is <= 1.5 Mbps, please do not set the Debug UART > 1.5 Mbps.
+    // The default Debug UART baud rate is 115200, and default HCI UART baud rate is 3Mbps
+    debug_uart_set_baudrate(115200);
+
+    // CYW943022M2BTBGA doesn't have GPIO pin for PUART.
+    // CYW943022M2BTBGA Debug UART Tx (WICED_GPIO_02) is connected to UART2_RX (ARD_D1) on PUART Level Translators of CYW9BTM2BASE1.
+    // We need to set to WICED_ROUTE_DEBUG_TO_DBG_UART to see traces on PUART of CYW9BTM2BASE1.
+    // wiced_set_debug_uart( WICED_ROUTE_DEBUG_TO_WICED_UART );
+    wiced_set_debug_uart( WICED_ROUTE_DEBUG_TO_DBG_UART );
+#else
     // Set to PUART to see traces on peripheral uart(puart)
     wiced_set_debug_uart( WICED_ROUTE_DEBUG_TO_PUART );
+
 #if ( defined(CYW20706A2) || defined(CYW43012C0) )
     wiced_hal_puart_select_uart_pads( WICED_PUART_RXD, WICED_PUART_TXD, 0, 0);
 #endif
@@ -1208,8 +1244,8 @@ APPLICATION_START( )
     // be called with wiced_transport_cfg_t.wiced_trbasort_data_handler_t callback present
     wiced_set_debug_uart(WICED_ROUTE_DEBUG_TO_WICED_UART);
 #endif
-
-#endif
+#endif  //CYW43022C1
+#endif  //WICED_BT_TRACE_ENABLE
 
 #ifdef BAS_1_1
     WICED_BT_TRACE( "\nBattery Service Client v1.1 Start\n" );
